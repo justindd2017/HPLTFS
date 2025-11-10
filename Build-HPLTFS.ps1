@@ -1,7 +1,7 @@
 <#
 Build-HPLTFS.ps1
-Fully automated HPLTFS build on Windows with FUSE support
-Installs missing MSYS2 packages and WinFsp if needed
+Automated build script for HPLTFS on Windows.
+Handles MSYS2 setup, WinFsp/FUSE detection from registry, and builds HPLTFS with optional FUSE support.
 #>
 
 param(
@@ -12,76 +12,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# --- Function to get latest MSYS2 installer ---
-function Get-LatestMsys2InstallerUrl {
-    $baseUrl = "https://repo.msys2.org/distrib/x86_64/"
-    $html = Invoke-WebRequest -Uri $baseUrl -UseBasicParsing
-    $match = ($html.Links | Where-Object { $_.href -match "^msys2-x86_64-\d{8}\.exe$" } | Sort-Object href)[-1]
-    if (-not $match) { throw "Could not find latest MSYS2 installer." }
-    return $baseUrl + $match.href
-}
-
 # --- MSYS2 detection ---
 $Msys2Root = "C:\msys64"
 $Msys2Bash = "$Msys2Root\usr\bin\bash.exe"
-
 if (-not (Test-Path $Msys2Bash)) {
-    Write-Host "MSYS2 not found. Downloading..."
-    $InstallerUrl = Get-LatestMsys2InstallerUrl
-    $InstallerPath = "$env:TEMP\msys2-installer.exe"
-    Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerPath
-    Start-Process -FilePath $InstallerPath -Wait
-}
-
-if (-not (Test-Path $Msys2Bash)) {
-    Write-Error "MSYS2 bash not found after installation."
+    Write-Error "MSYS2 not found. Please install MSYS2 manually from https://www.msys2.org/ and rerun."
     exit 1
-}
-
-Write-Host "MSYS2 bash detected at $Msys2Bash"
-
-# --- WinFsp detection ---
-$WinFspPath = "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe"
-if (-not (Test-Path $WinFspPath)) {
-    Write-Host "WinFsp not found. Downloading..."
-    $WinFspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
-    $InstallerPath = "$env:TEMP\WinFsp-Installer.msi"
-
-    # Check for curl
-    if (-not (Get-Command curl -ErrorAction SilentlyContinue)) {
-        Write-Error "curl is required to download WinFsp automatically. Please install curl."
-        exit 1
-    }
-
-    # Remove any old file
-    if (Test-Path $InstallerPath) { Remove-Item $InstallerPath -Force }
-
-    # Download WinFsp
-    Write-Host "Downloading WinFsp..."
-    Start-Process -FilePath "curl" -ArgumentList "-L", $WinFspUrl, "-o", $InstallerPath -Wait
-
-    # Validate download
-    if (-not (Test-Path $InstallerPath) -or (Get-Item $InstallerPath).Length -lt 1MB) {
-        Write-Warning "WinFsp download failed. Please manually download from $WinFspUrl and install."
-        Write-Warning "Continuing without FUSE support..."
-        $WinFspPath = $null
-    } else {
-        # Run installer silently
-        Write-Host "Running WinFsp installer..."
-        & msiexec /i $InstallerPath
-
-        if (-not (Test-Path "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe")) {
-            Write-Warning "WinFsp installation failed. Continuing without FUSE support..."
-            $WinFspPath = $null
-        } else {
-            $WinFspPath = "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe"
-        }
-    }
-}
-if ($WinFspPath) {
-    Write-Host "WinFsp detected at $WinFspPath"
-} else {
-    Write-Warning "FUSE support will be disabled."
 }
 
 # --- Repository root ---
@@ -94,7 +30,31 @@ $DriveLetter = $RepoRoot.Substring(0,1).ToLower()
 $MsysRepoRoot = "/$DriveLetter$($RepoRoot.Substring(2) -replace '\\','/')"
 $MsysLtfsRoot = "$MsysRepoRoot/ltfs"
 
-# --- MSYS2 packages ---
+# --- WinFsp development files detection (registry-based) ---
+$WinFspInclude = ""
+$WinFspLib     = ""
+$EnableFuse    = ""
+
+try {
+    $regKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
+    $installPath = (Get-ItemProperty -Path $regKey -Name "InstallDir").InstallDir
+    if (Test-Path $installPath) {
+        $WinFspInclude = Join-Path $installPath "inc"
+        $WinFspLib     = Join-Path $installPath "lib"
+        if ((Test-Path $WinFspInclude) -and (Test-Path $WinFspLib)) {
+            Write-Host "WinFsp development files detected at $installPath. Enabling FUSE support."
+            $EnableFuse = "--enable-fuse"
+        } else {
+            Write-Warning "WinFsp headers/libs missing under $installPath. FUSE disabled."
+        }
+    } else {
+        Write-Warning "WinFsp registry entry found but directory does not exist. FUSE disabled."
+    }
+} catch {
+    Write-Warning "WinFsp not found in registry. FUSE support disabled."
+}
+
+# --- MSYS2 packages required ---
 $Deps = @(
     "base-devel",
     "mingw-w64-x86_64-toolchain",
@@ -105,9 +65,7 @@ $Deps = @(
     "mingw-w64-x86_64-zlib",
     "mingw-w64-x86_64-libtool"
 )
-if ($WinFspPath) {
-    $Deps += "mingw-w64-x86_64-fuse"
-}
+if ($EnableFuse -ne "") { $Deps += "mingw-w64-x86_64-fuse" }
 
 $DepsList = ($Deps -join " ")
 
@@ -136,11 +94,15 @@ if (-not (Test-Path "$RepoRoot\ltfs\configure")) {
 # --- Build HPLTFS ---
 $Cores = [Environment]::ProcessorCount
 
-$EnableFuse = ""
-if ($WinFspPath) { $EnableFuse = "--enable-fuse" }
+# Set environment variables for FUSE to bypass pkg-config if enabled
+$FuseEnv = ""
+if ($EnableFuse -ne "") {
+    $FuseEnv = "export FUSE_MODULE_CFLAGS='-I$WinFspInclude'; export FUSE_MODULE_LIBS='-L$WinFspLib -lfuse';"
+}
 
 $BuildCommand = @"
 source /etc/profile
+$FuseEnv
 export PATH=/mingw64/bin:`$PATH
 cd $MsysLtfsRoot
 ./configure --prefix=$Prefix CC=gcc CXX=g++ $EnableFuse
@@ -159,5 +121,5 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host @"
 === HPLTFS build and optional install completed successfully ===
-FUSE support is $(if ($WinFspPath) {"enabled"} else {"disabled"}).
+FUSE support is $(if ($EnableFuse) {"enabled"} else {"disabled"}).
 "@ -ForegroundColor Green
