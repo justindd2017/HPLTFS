@@ -1,7 +1,7 @@
 <#
 Build-HPLTFS.ps1
 Automated build script for HPLTFS on Windows.
-Handles MSYS2 setup, WinFsp/FUSE detection from registry, and builds HPLTFS with optional FUSE support.
+Handles MSYS2 setup, WinFsp/FUSE detection, UUID configuration, and builds HPLTFS.
 #>
 
 param(
@@ -39,6 +39,7 @@ try {
     $regKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
     $installPath = (Get-ItemProperty -Path $regKey -Name "InstallDir").InstallDir
     if (Test-Path $installPath) {
+        # WinFsp dev files are under 'inc' and 'lib'
         $WinFspInclude = Join-Path $installPath "inc"
         $WinFspLib     = Join-Path $installPath "lib"
         if ((Test-Path $WinFspInclude) -and (Test-Path $WinFspLib)) {
@@ -54,7 +55,7 @@ try {
     Write-Warning "WinFsp not found in registry. FUSE support disabled."
 }
 
-# --- MSYS2 packages required ---
+# --- Required MSYS2 packages ---
 $Deps = @(
     "base-devel",
     "mingw-w64-x86_64-toolchain",
@@ -63,11 +64,8 @@ $Deps = @(
     "mingw-w64-x86_64-libxml2",
     "mingw-w64-x86_64-icu",
     "mingw-w64-x86_64-zlib",
-    "mingw-w64-x86_64-libtool",
-    "mingw-w64-x86_64-libuuid"
+    "mingw-w64-x86_64-libtool"
 )
-if ($EnableFuse -ne "") { $Deps += "mingw-w64-x86_64-fuse" }
-
 $DepsList = ($Deps -join " ")
 
 # --- Install missing MSYS2 packages ---
@@ -95,7 +93,11 @@ if (-not (Test-Path "$RepoRoot\ltfs\configure")) {
 # --- Build HPLTFS ---
 $Cores = [Environment]::ProcessorCount
 
-# Set environment variables for FUSE to bypass pkg-config if enabled
+# UUID configuration for Windows
+$UUID_CFLAGS = ""
+$UUID_LIBS   = "-lrpcrt4"
+
+# FUSE environment if enabled
 $FuseEnv = ""
 if ($EnableFuse -ne "") {
     $FuseEnv = "export FUSE_MODULE_CFLAGS='-I$WinFspInclude'; export FUSE_MODULE_LIBS='-L$WinFspLib -lfuse';"
@@ -104,6 +106,8 @@ if ($EnableFuse -ne "") {
 $BuildCommand = @"
 source /etc/profile
 $FuseEnv
+export UUID_CFLAGS='$UUID_CFLAGS'
+export UUID_LIBS='$UUID_LIBS'
 export PATH=/mingw64/bin:`$PATH
 cd $MsysLtfsRoot
 ./configure --prefix=$Prefix CC=gcc CXX=g++ $EnableFuse
@@ -123,4 +127,5 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host @"
 === HPLTFS build and optional install completed successfully ===
 FUSE support is $(if ($EnableFuse) {"enabled"} else {"disabled"}).
+UUID support uses Windows rpcrt4 library.
 "@ -ForegroundColor Green
