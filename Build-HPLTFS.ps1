@@ -64,7 +64,10 @@ $Deps = @(
     "mingw-w64-x86_64-libxml2",
     "mingw-w64-x86_64-icu",
     "mingw-w64-x86_64-zlib",
-    "mingw-w64-x86_64-libtool"
+    "mingw-w64-x86_64-libtool",
+    "autoconf",
+    "automake",
+    "pkg-config"
 )
 $DepsList = ($Deps -join " ")
 
