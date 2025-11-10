@@ -112,9 +112,11 @@ $FuseEnv
 export UUID_CFLAGS='$UUID_CFLAGS'
 export UUID_LIBS='$UUID_LIBS'
 export PATH=/mingw64/bin:`$PATH
+export GENRB='genrb -O $MsysLtfsRoot/messages'
 cd $MsysLtfsRoot
 ./configure --prefix=$Prefix CC=gcc CXX=g++ $EnableFuse
-make -j$Cores
+make -j1
+#make -j$Cores
 "@
 
 if ($Install) { $BuildCommand += "`nmake install" }
