@@ -1,7 +1,7 @@
 <#
-Build-HPLTFS-Auto-NoFUSE.ps1
-Fully automated HPLTFS build on Windows (FUSE disabled)
-Installs only missing MSYS2 packages
+Build-HPLTFS.ps1
+Fully automated HPLTFS build on Windows with FUSE support
+Installs missing MSYS2 packages and WinFsp if needed
 #>
 
 param(
@@ -40,6 +40,50 @@ if (-not (Test-Path $Msys2Bash)) {
 
 Write-Host "MSYS2 bash detected at $Msys2Bash"
 
+# --- WinFsp detection ---
+$WinFspPath = "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe"
+if (-not (Test-Path $WinFspPath)) {
+    Write-Host "WinFsp not found. Downloading..."
+    $WinFspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
+    $InstallerPath = "$env:TEMP\WinFsp-Installer.msi"
+
+    # Check for curl
+    if (-not (Get-Command curl -ErrorAction SilentlyContinue)) {
+        Write-Error "curl is required to download WinFsp automatically. Please install curl."
+        exit 1
+    }
+
+    # Remove any old file
+    if (Test-Path $InstallerPath) { Remove-Item $InstallerPath -Force }
+
+    # Download WinFsp
+    Write-Host "Downloading WinFsp..."
+    Start-Process -FilePath "curl" -ArgumentList "-L", $WinFspUrl, "-o", $InstallerPath -Wait
+
+    # Validate download
+    if (-not (Test-Path $InstallerPath) -or (Get-Item $InstallerPath).Length -lt 1MB) {
+        Write-Warning "WinFsp download failed. Please manually download from $WinFspUrl and install."
+        Write-Warning "Continuing without FUSE support..."
+        $WinFspPath = $null
+    } else {
+        # Run installer silently
+        Write-Host "Running WinFsp installer..."
+        & msiexec /i $InstallerPath
+
+        if (-not (Test-Path "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe")) {
+            Write-Warning "WinFsp installation failed. Continuing without FUSE support..."
+            $WinFspPath = $null
+        } else {
+            $WinFspPath = "C:\Program Files (x86)\WinFsp\bin\winfspctl.exe"
+        }
+    }
+}
+if ($WinFspPath) {
+    Write-Host "WinFsp detected at $WinFspPath"
+} else {
+    Write-Warning "FUSE support will be disabled."
+}
+
 # --- Repository root ---
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Write-Host "Repository root: $RepoRoot"
@@ -61,11 +105,13 @@ $Deps = @(
     "mingw-w64-x86_64-zlib",
     "mingw-w64-x86_64-libtool"
 )
+if ($WinFspPath) {
+    $Deps += "mingw-w64-x86_64-fuse"
+}
 
-# --- Build space-separated list for Bash ---
 $DepsList = ($Deps -join " ")
 
-# --- Install missing MSYS2 packages (protected $pkg) ---
+# --- Install missing MSYS2 packages ---
 $PkgInstallCommand = '
 source /etc/profile
 for pkg in ' + $DepsList + '; do
@@ -90,18 +136,20 @@ if (-not (Test-Path "$RepoRoot\ltfs\configure")) {
 # --- Build HPLTFS ---
 $Cores = [Environment]::ProcessorCount
 
-$BuildCommand = '
+$EnableFuse = ""
+if ($WinFspPath) { $EnableFuse = "--enable-fuse" }
+
+$BuildCommand = @"
 source /etc/profile
-export PATH=/mingw64/bin:$PATH
-cd ' + $MsysLtfsRoot + '
-./configure --prefix=' + $Prefix + ' CC=gcc CXX=g++ --disable-fuse
-make -j' + $Cores
+export PATH=/mingw64/bin:`$PATH
+cd $MsysLtfsRoot
+./configure --prefix=$Prefix CC=gcc CXX=g++ $EnableFuse
+make -j$Cores
+"@
 
-if ($Install) {
-    $BuildCommand += "`nmake install"
-}
+if ($Install) { $BuildCommand += "`nmake install" }
 
-Write-Host "Starting HPLTFS build inside MSYS2 MinGW64 (FUSE disabled)..."
+Write-Host "Starting HPLTFS build inside MSYS2 MinGW64..."
 & $Msys2Bash -lc $BuildCommand
 
 if ($LASTEXITCODE -ne 0) {
@@ -109,5 +157,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "=== HPLTFS build and optional install completed successfully ===" -ForegroundColor Green
-Write-Host "Note: FUSE support is disabled. To enable FUSE, install WinFsp: https://winfsp.dev/"
+Write-Host @"
+=== HPLTFS build and optional install completed successfully ===
+FUSE support is $(if ($WinFspPath) {"enabled"} else {"disabled"}).
+"@ -ForegroundColor Green
