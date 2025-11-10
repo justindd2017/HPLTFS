@@ -63,7 +63,8 @@ $Deps = @(
     "mingw-w64-x86_64-libxml2",
     "mingw-w64-x86_64-icu",
     "mingw-w64-x86_64-zlib",
-    "mingw-w64-x86_64-libtool"
+    "mingw-w64-x86_64-libtool",
+    "mingw-w64-x86_64-libuuid"
 )
 if ($EnableFuse -ne "") { $Deps += "mingw-w64-x86_64-fuse" }
 
